@@ -13,6 +13,7 @@
     python tests/test_single_window.py --company 珠海 --pause 60
     python tests/test_single_window.py --export-list
     python tests/test_single_window.py --export-list --detail-no E20260001897868651
+    python tests/test_single_window.py --export-list --detail-no E20260001897868651 --bonded-no QD573026E000091160
     python tests/test_single_window.py --config "data/.../config.xlsx"
 """
 import argparse
@@ -32,6 +33,7 @@ from config.config_loader import ConfigError, ConfigLoader
 from log.loggingConfig import logger
 from utils.credential import CredentialError, get_password
 from web.browser import BrowserManager
+from web.single_window.bonded_list import BondedListQuery
 from web.single_window.declaration import DeclarationExport
 from web.single_window.login import SingleWindowLogin
 from web.single_window.query import DeclarationQuery
@@ -63,6 +65,14 @@ def parse_args() -> argparse.Namespace:
         help="按统一编号查询、详情导出并下载三个单据；不指定时取列表导出第一条",
     )
     parser.add_argument("--out-dir", default=str(DEFAULT_OUTPUT_DIR), help="导出目录，默认 data/.../03_Output")
+    parser.add_argument(
+        "--bonded-no", default="QD573026E000091160", metavar="保税核注清单编号",
+        help="保税核注清单打印下载；留空则跳过（默认用最新录制的清单号）",
+    )
+    parser.add_argument(
+        "--bonded-days", type=int, default=62,
+        help="保税核注清单查询天数，默认当天往前 62 天（日期跨度需小于 90 天）",
+    )
     return parser.parse_args()
 
 
@@ -197,15 +207,16 @@ def run(args: argparse.Namespace) -> None:
         DeclarationQuery(goods_page).search(start_date, end_date, submit=not args.no_submit)
 
         exported = []
+        stamp = time.strftime("%Y%m%d %H%M%S")
+        out_dir = Path(args.out_dir)
+        download_timeout = int(loader.get("系统配置.下载超时(秒)", 60)) * 1000
+
         if args.export_list or args.detail_no:
             if args.no_submit:
                 raise ConfigError("--no-submit 只填写查询条件，不能导出，请去掉该参数")
-            download_timeout = int(loader.get("系统配置.下载超时(秒)", 60)) * 1000
             exporter = DeclarationExport(
                 goods_page, page_timeout=page_timeout, download_timeout=download_timeout
             )
-            stamp = time.strftime("%Y%m%d %H%M%S")
-            out_dir = Path(args.out_dir)
 
             detail_nos = list(args.detail_no)
             if args.export_list:
@@ -226,6 +237,25 @@ def run(args: argparse.Namespace) -> None:
                 exported.extend(
                     exporter.download_invoice_packing(cus_ciq_no, out_dir / "下载单据").values()
                 )
+
+        if args.bonded_no:
+            bonded_end = date.today()
+            bonded_days = min(max(args.bonded_days, 1), 90)
+            bonded_start = bonded_end - timedelta(days=bonded_days - 1)
+            bonded = BondedListQuery(
+                browser.page, page_timeout=page_timeout, download_timeout=download_timeout
+            )
+            bonded.open()
+            found = bonded.query(args.bonded_no, bonded_start, bonded_end)
+            if found:
+                exported.append(
+                    bonded.print_list(
+                        args.bonded_no,
+                        out_dir / "下载单据" / f"{args.bonded_no}-保税核注清单.pdf",
+                    )
+                )
+            else:
+                logger.warning(f"保税核注清单无数据，跳过下载: {args.bonded_no}")
 
         action = "已填写查询条件（未提交）" if args.no_submit else "已提交查询"
         print(f"PASS: {company_name} {action}，最近操作时间 {start_date} ~ {end_date}")

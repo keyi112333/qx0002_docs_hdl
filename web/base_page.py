@@ -3,14 +3,19 @@
 """
 页面操作基类
 """
+import time
+from pathlib import Path
 from typing import Optional
+
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 from log.loggingConfig import logger
 
 
 class BasePage:
     """页面操作基类
 
-    提供通用的页面操作方法：点击、输入、等待、截图等
+    提供通用的页面操作方法：点击、输入、等待、截图、下载保存等
     """
 
     def __init__(self, page):
@@ -81,3 +86,111 @@ class BasePage:
     def wait(self, timeout: int = 1000) -> None:
         """等待指定时间"""
         self.page.wait_for_timeout(timeout)
+
+    @staticmethod
+    def check_box(locator) -> None:
+        """勾选表格复选框
+
+        bootstrap-table 的固定表头与页面侧边导航会拦截真实点击，
+        改为直接派发 click，再校验勾选状态，避免静默失败。
+        """
+        if not locator.is_checked():
+            locator.evaluate("el => el.click()")
+        if not locator.is_checked():
+            raise RuntimeError(f"复选框勾选未生效: {locator}")
+
+    def save_download(self, click, save_path, pdf_preview: bool = False, timeout: int = None) -> Path:
+        """执行 click 并保存结果文件
+
+        详情导出会直接产生下载；打印/打印预览会在弹窗中打开浏览器 PDF 查看器，
+        其工具栏位于扩展的 shadow DOM 中无法点击，改为按弹窗地址直接取 PDF。
+        下载事件可能挂在主页面或弹窗页上，因此两处都监听。
+        """
+        timeout = timeout or getattr(self, "download_timeout", 60000)
+        path = Path(save_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        downloads = []
+        popups = []
+
+        # Playwright 会给事件处理器设置属性，不能直接传 list.append；
+        # 弹窗一创建就挂下载监听，避免弹窗内立即触发的下载漏接
+        def collect_page_download(download) -> None:
+            downloads.append(download)
+
+        def collect_popup(popup) -> None:
+            popups.append(popup)
+
+            def collect_popup_download(download) -> None:
+                downloads.append(download)
+
+            popup.on("download", collect_popup_download)
+            logger.info(f"已打开弹窗: {popup.url}")
+
+        self.page.on("download", collect_page_download)
+        self.page.on("popup", collect_popup)
+        try:
+            click()
+
+            # 等待弹窗/下载事件登记；直接下载时无需等待弹窗
+            deadline = time.time() + 10
+            while time.time() < deadline and not popups and not downloads:
+                self.page.wait_for_timeout(100)
+
+            if pdf_preview:
+                for popup in popups:
+                    if self._fetch_popup_pdf(popup, path):
+                        return path
+
+            download = self._wait_download(downloads, timeout)
+            suggested = Path(download.suggested_filename)
+            if suggested.suffix and suggested.suffix.lower() != path.suffix.lower():
+                path = path.with_suffix(suggested.suffix)
+                logger.info(f"按实际文件格式保存: {suggested.name} -> {path.name}")
+            download.save_as(path)
+            return path
+        finally:
+            self.page.remove_listener("download", collect_page_download)
+            self.page.remove_listener("popup", collect_popup)
+            for popup in popups:
+                try:
+                    popup.close()
+                except Exception:
+                    pass
+
+    def _fetch_popup_pdf(self, popup, path: Path) -> bool:
+        """按预览弹窗地址取回 PDF
+
+        浏览器 PDF 查看器的工具栏在扩展的 shadow DOM 中无法点击，
+        这里用与浏览器共享 Cookie 的 APIRequestContext 直接请求该地址。
+        """
+        deadline = time.time() + 15
+        while time.time() < deadline and not popup.url:
+            self.page.wait_for_timeout(200)
+
+        url = popup.url
+        if not url:
+            logger.warning("预览弹窗地址为空，改为等待下载事件")
+            return False
+
+        try:
+            response = popup.context.request.get(url, headers={"Referer": self.page.url})
+            body = response.body() if response.ok else b""
+        except Exception as e:
+            raise RuntimeError(f"按预览地址获取 PDF 失败: {e}") from None
+
+        if not body.startswith(b"%PDF"):
+            raise RuntimeError(f"预览地址未返回 PDF: HTTP {response.status} {url}")
+
+        path.write_bytes(body)
+        logger.info(f"已按预览地址保存 PDF: {url}")
+        return True
+
+    def _wait_download(self, downloads: list, timeout: int):
+        """等待任一页面产生的下载事件"""
+        deadline = time.time() + timeout / 1000
+        while time.time() < deadline:
+            if downloads:
+                return downloads[0]
+            self.page.wait_for_timeout(200)
+        raise RuntimeError(f"等待下载超时（{timeout / 1000:.0f} 秒）")
