@@ -223,6 +223,9 @@ def run(args: argparse.Namespace) -> None:
                 exported.extend(
                     exporter.download_documents(cus_ciq_no, out_dir / "下载单据").values()
                 )
+                exported.extend(
+                    exporter.download_invoice_packing(cus_ciq_no, out_dir / "下载单据").values()
+                )
 
         action = "已填写查询条件（未提交）" if args.no_submit else "已提交查询"
         print(f"PASS: {company_name} {action}，最近操作时间 {start_date} ~ {end_date}")

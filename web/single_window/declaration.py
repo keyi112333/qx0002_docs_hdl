@@ -29,6 +29,8 @@ ROW_CHECK_BOX = f'{RESULT_TABLE} input[name="btSelectItem"]'
 LIST_EXPORT_BUTTON = "列表导出"
 DETAIL_EXPORT_BUTTON = "详情导出"
 PREVIEW_TEXT = "打印预览"
+ATTACHMENT_BUTTON = "随附单据"
+ATTACHMENT_DOCS = ("发票", "装箱单")
 
 # 需要下载的三类单据：(单据名称, 打印按钮名称)
 DOCUMENT_BUTTONS = (
@@ -208,6 +210,107 @@ class DeclarationExport(BasePage):
             logger.info(f"单据下载完成: {doc_name} -> {path}")
         return saved
 
+    def download_invoice_packing(self, cus_ciq_no: str, save_dir) -> dict:
+        """点击结果列表里的统一编号进入单据页，从【随附单据】下载发票与装箱单
+
+        录制脚本里点到的是“发票/文件名”单元格，实际要行内的【下载】才会出文件；
+        下载完成后关闭单据页并返回报关数据查询，便于继续处理下一条。
+        """
+        list_frame = self._find_frame()
+        list_frame.get_by_role("link", name=cus_ciq_no).click()
+
+        detail = self._find_frame_with_button(ATTACHMENT_BUTTON)
+        self._confirm_dialog(detail)
+        detail.get_by_role("button", name=re.compile(ATTACHMENT_BUTTON)).click()
+
+        out_dir = Path(save_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        saved = {}
+        for doc_name in ATTACHMENT_DOCS:
+            row = detail.get_by_role("row", name=re.compile(doc_name)).first
+            try:
+                row.wait_for(timeout=self.page_timeout)
+            except PlaywrightTimeoutError:
+                raise RuntimeError(f"随附单据中未找到 {doc_name}: {cus_ciq_no}") from None
+
+            path = self._save_download(
+                lambda: self._click_row_download(row, detail),
+                out_dir / f"{cus_ciq_no}-{doc_name}.pdf",
+            )
+            saved[doc_name] = path
+            logger.info(f"附件下载完成: {doc_name} -> {path}")
+
+        self._close_declaration(detail)
+        self.back_to_query()
+        return saved
+
+    def back_to_query(self) -> None:
+        """返回报关数据查询（综合查询菜单可能是收起状态，需要先展开）"""
+        target = self.page.get_by_title("报关数据查询")
+        if target.count() == 0 or not target.first.is_visible():
+            self.page.locator("a").filter(has_text="综合查询").first.click()
+        self.page.get_by_title("报关数据查询").click()
+        logger.info("已返回报关数据查询")
+
+    def _close_declaration(self, frame) -> None:
+        """关闭单据页；上传/保存/关闭三个按钮相邻，需按名称精确点【关闭】"""
+        for locator in (
+            frame.get_by_role("button", name="关闭", exact=True),
+            frame.get_by_role("link", name="关闭", exact=True),
+            frame.get_by_text("关闭", exact=True),
+        ):
+            if locator.count() > 0:
+                locator.first.click()
+                logger.info("已关闭单据页")
+                return
+        raise RuntimeError("单据页未找到【关闭】按钮")
+
+    def _click_row_download(self, row, detail) -> None:
+        """点击行内【下载】；行内没有下载入口时先选中行再点工具栏下载"""
+        for locator in (
+            row.get_by_text("下载", exact=True),
+            row.get_by_role("link", name=re.compile("下载")),
+            row.get_by_role("button", name=re.compile("下载")),
+        ):
+            if locator.count() > 0:
+                locator.first.click()
+                return
+
+        row.click()
+        detail.get_by_role("button", name=re.compile("下载")).first.click()
+
+    def _confirm_dialog(self, frame, timeout: int = 2000) -> bool:
+        """点击统一编号后可能弹出信息框，点【确定】关闭；未出现则跳过"""
+        deadline = time.time() + timeout / 1000
+        while time.time() < deadline:
+            for scope in (frame, self.page):
+                try:
+                    confirm = scope.locator("a.layui-layer-btn0")
+                    if confirm.count() > 0 and confirm.first.is_visible():
+                        confirm.first.click()
+                        logger.info("已点击信息弹窗的【确定】")
+                        return True
+                except Exception:
+                    continue
+            self.page.wait_for_timeout(200)
+        return False
+
+    def _find_frame_with_button(self, button_name: str, timeout: int = None):
+        """在所有 frame 中查找包含指定按钮的页面（单据页 iframe 名称不固定）"""
+        pattern = re.compile(button_name)
+        deadline = time.time() + (timeout or self.page_timeout) / 1000
+        while time.time() < deadline:
+            for frame in self.page.frames:
+                try:
+                    button = frame.get_by_role("button", name=pattern)
+                    if button.count() > 0 and button.first.is_visible():
+                        return frame
+                except Exception:
+                    continue
+            self.page.wait_for_timeout(500)
+        raise RuntimeError(f"未找到包含【{button_name}】按钮的单据页")
+
     @staticmethod
     def _check_box(locator) -> None:
         """勾选表格复选框
@@ -263,6 +366,10 @@ class DeclarationExport(BasePage):
                         return path
 
             download = self._wait_download(downloads)
+            suggested = Path(download.suggested_filename)
+            if suggested.suffix and suggested.suffix.lower() != path.suffix.lower():
+                path = path.with_suffix(suggested.suffix)
+                logger.info(f"按实际文件格式保存: {suggested.name} -> {path.name}")
             download.save_as(path)
             return path
         finally:
