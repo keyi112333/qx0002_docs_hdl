@@ -47,6 +47,7 @@ class SingleWindowLoginSubtask(TaskBase):
         channel = config.get("系统配置.浏览器通道", "msedge")
         url = config.get("系统配置.单一窗口地址", "https://www.singlewindow.cn/#/")
         page_timeout = int(config.get("系统配置.页面超时(秒)", 30)) * 1000
+        login_timeout = int(config.get("系统配置.登录超时(秒)", 120)) * 1000
         query_step = int(config.get("业务参数.查询分段天数", 7))
 
         browser = BrowserManager(headless=headless, channel=channel)
@@ -55,7 +56,7 @@ class SingleWindowLoginSubtask(TaskBase):
         self.context.set("current_company", self.company)
 
         login = SingleWindowLogin(browser, url=url, page_timeout=page_timeout)
-        login.login(password)
+        login.login(password, timeout=login_timeout)
         goods_page = login.open_declaration_query()
 
         end_date = date.today()

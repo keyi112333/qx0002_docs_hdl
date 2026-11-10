@@ -48,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--company", default=None, help="公司名称，缺省取第一家启用的公司")
     parser.add_argument("--days", type=int, default=7, help="最近操作时间天数，默认 7 天")
     parser.add_argument("--pause", type=int, default=30, help="查询后浏览器保持打开的秒数，0 表示立即关闭")
+    parser.add_argument("--no-submit", action="store_true", help="只填写查询条件、不点击查询，便于人工确认")
     return parser.parse_args()
 
 
@@ -88,19 +89,21 @@ def run(args: argparse.Namespace) -> None:
     channel = loader.get("系统配置.浏览器通道", "msedge")
     url = loader.get("系统配置.单一窗口地址", "https://www.singlewindow.cn/#/")
     page_timeout = int(loader.get("系统配置.页面超时(秒)", 30)) * 1000
+    login_timeout = int(loader.get("系统配置.登录超时(秒)", 120)) * 1000
 
     browser = BrowserManager(headless=headless, channel=channel)
     browser.start()
     try:
         login = SingleWindowLogin(browser, url=url, page_timeout=page_timeout)
-        login.login(password)
+        login.login(password, timeout=login_timeout)
         goods_page = login.open_declaration_query()
 
         end_date = date.today()
         start_date = end_date - timedelta(days=args.days - 1)
-        DeclarationQuery(goods_page).search(start_date, end_date)
+        DeclarationQuery(goods_page).search(start_date, end_date, submit=not args.no_submit)
 
-        print(f"PASS: {company_name} 已提交查询，最近操作时间 {start_date} ~ {end_date}")
+        action = "已填写查询条件（未提交）" if args.no_submit else "已提交查询"
+        print(f"PASS: {company_name} {action}，最近操作时间 {start_date} ~ {end_date}")
         if args.pause > 0:
             print(f"浏览器保持打开 {args.pause} 秒，可人工确认查询结果...")
             goods_page.wait_for_timeout(args.pause * 1000)
