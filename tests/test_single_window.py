@@ -3,7 +3,7 @@
 """
 单一窗口独立测试脚本
 
-只执行“单一窗口登录 + 报关数据查询”部分：
+只执行“单一窗口登录 + 报关数据查询 + 列表导出/详情导出/单据下载”部分：
 - 不加载 UserConfig，不执行 initEnv（不会关闭其他进程）
 - 公司、凭据目标名、浏览器参数直接读取 config.xlsx
 - 卡口令从 Windows 凭据管理器读取
@@ -11,12 +11,18 @@
 用法：
     python tests/test_single_window.py
     python tests/test_single_window.py --company 珠海 --pause 60
+    python tests/test_single_window.py --export-list
+    python tests/test_single_window.py --export-list --detail-no E20260001897868651
     python tests/test_single_window.py --config "data/.../config.xlsx"
 """
 import argparse
 import sys
+import time
 from datetime import date, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
+
+import openpyxl
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -26,12 +32,14 @@ from config.config_loader import ConfigError, ConfigLoader
 from log.loggingConfig import logger
 from utils.credential import CredentialError, get_password
 from web.browser import BrowserManager
+from web.single_window.declaration import DeclarationExport
 from web.single_window.login import SingleWindowLogin
 from web.single_window.query import DeclarationQuery
 
 DEFAULT_CONFIG = (
     ROOT / "data" / "QX0002_报关单和放行通知单等单据的处理" / "01_Config" / "config.xlsx"
 )
+DEFAULT_OUTPUT_DIR = ROOT / "data" / "QX0002_报关单和放行通知单等单据的处理" / "03_Output"
 
 
 def _as_bool(value, default: bool = False) -> bool:
@@ -49,6 +57,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--days", type=int, default=7, help="最近操作时间天数，默认 7 天")
     parser.add_argument("--pause", type=int, default=30, help="查询后浏览器保持打开的秒数，0 表示立即关闭")
     parser.add_argument("--no-submit", action="store_true", help="只填写查询条件、不点击查询，便于人工确认")
+    parser.add_argument("--export-list", action="store_true", help="查询后全选并导出报关单列表")
+    parser.add_argument(
+        "--detail-no", action="append", default=[], metavar="统一编号",
+        help="按统一编号查询、详情导出并下载三个单据；不指定时取列表导出第一条",
+    )
+    parser.add_argument("--out-dir", default=str(DEFAULT_OUTPUT_DIR), help="导出目录，默认 data/.../03_Output")
     return parser.parse_args()
 
 
@@ -73,6 +87,86 @@ def load_company(config_path: Path, company_name: str = None):
         raise ConfigError(f"公司盾配置中未找到公司: {company_name}")
 
     return loader, companies[0]
+
+
+def _read_text(list_path: Path) -> str:
+    """按 UTF-8 / GB18030 依次尝试解码"""
+    raw = list_path.read_bytes()
+    for encoding in ("utf-8", "gb18030"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+class _TableRowParser(HTMLParser):
+    """解析 HTML 表格，按行返回单元格文本（单一窗口的 xls 导出实为 HTML）"""
+
+    def __init__(self):
+        super().__init__()
+        self.rows = []
+        self._row = None
+        self._cell = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "tr":
+            self._row = []
+        elif tag in ("td", "th") and self._row is not None:
+            self._cell = []
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self._cell is not None:
+            self._row.append("".join(self._cell).strip())
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell.append(data)
+
+
+def _iter_excel_rows(list_path: Path):
+    """按实际内容读取导出文件的行（xlsx 用 openpyxl，xls 用 xlrd 或 HTML 解析）"""
+    if list_path.suffix.lower() == ".xls":
+        with list_path.open("rb") as file:
+            head = file.read(4)
+        if head.startswith(b"<"):
+            parser = _TableRowParser()
+            parser.feed(_read_text(list_path))
+            yield from parser.rows
+            return
+        try:
+            import xlrd
+        except ImportError:
+            raise RuntimeError("导出文件为二进制 .xls，请先安装 xlrd: pip install xlrd") from None
+        sheet = xlrd.open_workbook(str(list_path)).sheet_by_index(0)
+        for index in range(sheet.nrows):
+            yield sheet.row_values(index)
+        return
+
+    workbook = openpyxl.load_workbook(list_path, data_only=True, read_only=True)
+    try:
+        for row in workbook.active.iter_rows(values_only=True):
+            yield row
+    finally:
+        workbook.close()
+
+
+def read_first_unified_no(list_path: Path) -> str:
+    """读取报关单列表导出文件中的第一条统一编号"""
+    column = None
+    for row in _iter_excel_rows(list_path):
+        values = ["" if value is None else str(value).strip() for value in row]
+        if column is None:
+            if "统一编号" in values:
+                column = values.index("统一编号")
+            continue
+        if column < len(values) and values[column]:
+            return values[column]
+    raise ValueError(f"导出列表中没有找到统一编号: {list_path}")
 
 
 def run(args: argparse.Namespace) -> None:
@@ -102,8 +196,38 @@ def run(args: argparse.Namespace) -> None:
         start_date = end_date - timedelta(days=args.days - 1)
         DeclarationQuery(goods_page).search(start_date, end_date, submit=not args.no_submit)
 
+        exported = []
+        if args.export_list or args.detail_no:
+            if args.no_submit:
+                raise ConfigError("--no-submit 只填写查询条件，不能导出，请去掉该参数")
+            download_timeout = int(loader.get("系统配置.下载超时(秒)", 60)) * 1000
+            exporter = DeclarationExport(
+                goods_page, page_timeout=page_timeout, download_timeout=download_timeout
+            )
+            stamp = time.strftime("%Y%m%d %H%M%S")
+            out_dir = Path(args.out_dir)
+
+            detail_nos = list(args.detail_no)
+            if args.export_list:
+                list_path = out_dir / "报关单列表" / f"{company_name}-报关单列表-{stamp}.xlsx"
+                exported.append(exporter.export_list(list_path))
+                if not detail_nos:
+                    # BIP 比对未接入前，默认取导出列表的第一条统一编号
+                    detail_nos = [read_first_unified_no(list_path)]
+                    logger.info(f"默认取导出列表第一条统一编号: {detail_nos[0]}")
+
+            for cus_ciq_no in detail_nos:
+                exporter.query_by_no(cus_ciq_no)
+                detail_path = out_dir / "报关单详情" / f"{cus_ciq_no}-报关单详情-{stamp}.xlsx"
+                exported.append(exporter.export_detail(cus_ciq_no, detail_path))
+                exported.extend(
+                    exporter.download_documents(cus_ciq_no, out_dir / "下载单据").values()
+                )
+
         action = "已填写查询条件（未提交）" if args.no_submit else "已提交查询"
         print(f"PASS: {company_name} {action}，最近操作时间 {start_date} ~ {end_date}")
+        for path in exported:
+            print(f"导出文件: {path}")
         if args.pause > 0:
             print(f"浏览器保持打开 {args.pause} 秒，可人工确认查询结果...")
             goods_page.wait_for_timeout(args.pause * 1000)
@@ -121,7 +245,7 @@ def main() -> int:
         print(f"测试前置条件失败: {e}")
         return 1
     except Exception as e:
-        logger.error(f"单一窗口测试失败: {e}")
+        logger.exception("单一窗口测试失败")
         print(f"测试失败: {e}")
         return 1
 
