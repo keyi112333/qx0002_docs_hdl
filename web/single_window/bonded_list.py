@@ -69,14 +69,12 @@ class BondedListQuery(BasePage):
         frame = self._find_frame()
 
         enterprise_type = frame.get_by_role("textbox", name=ENTERPRISE_TYPE_PLACEHOLDER)
-        enterprise_type.click()
-        enterprise_type.press(" ")
-        self._pick_option("加工单位")
+        self._focus_and_space(enterprise_type)
+        self._pick_option("加工单位", timeout=1500)
 
         customs_code = frame.get_by_role("textbox", name=CUSTOMS_CODE_PLACEHOLDER)
-        customs_code.click()
-        customs_code.press(" ")
-        self._pick_option(enterprise_code)
+        self._focus_and_space(customs_code)
+        self._pick_option(enterprise_code, timeout=1500)
 
         ie_flag = frame.locator(IE_FLAG_INPUT)
         ie_flag.click()
@@ -195,7 +193,20 @@ class BondedListQuery(BasePage):
             self.page.wait_for_timeout(300)
         return None
 
-    def _pick_option(self, text: str, timeout: int = 5000) -> bool:
+    @staticmethod
+    def _focus_and_space(locator) -> None:
+        """聚焦输入框后按空格唤出下拉
+
+        用 focus 代替 click，避免元素被浮层遮挡时反复等待可操作性（每次约 30 秒）；
+        聚焦/按键超时也只记录日志，不阻塞后续按清单号查询。
+        """
+        try:
+            locator.focus(timeout=3000)
+            locator.press(" ", timeout=3000)
+        except PlaywrightTimeoutError:
+            logger.warning("输入框聚焦或空格按键超时，跳过下拉选择")
+
+    def _pick_option(self, text: str, timeout: int = 1500) -> bool:
         """点输入框后按空格键才会弹出自动完成下拉，点其中匹配文本才算选中"""
         deadline = time.time() + timeout / 1000
         while time.time() < deadline:
