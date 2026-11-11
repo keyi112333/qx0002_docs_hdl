@@ -1,0 +1,40 @@
+import re
+from playwright.sync_api import Playwright, sync_playwright, expect
+
+
+def run(playwright: Playwright) -> None:
+    browser = playwright.chromium.launch(channel="msedge", headless=False)
+    context = browser.new_context()
+    page = context.new_page()
+    page.goto("https://e.chinaport.gov.cn/")
+    page.get_by_role("link", name="登录").click()
+    page.get_by_role("link", name="卡介质登录").click()
+    page.get_by_role("textbox", name="卡口令").click()
+    page.get_by_role("textbox", name="卡口令").fill("31231231")
+    page.locator("#agreementCardId > .custom-checkbox-wrapper > .custom-checkbox").click()
+    page.locator("#checkboxIntel").check()
+    page.get_by_role("link", name="登 录").click()
+    page.goto("https://e.chinaport.gov.cn/")
+    with page.expect_popup() as page1_info:
+        page.get_by_role("link", name="出口退税联网稽查", description="点击进入").click()
+    page1 = page1_info.value
+    page1.get_by_text("修改密码：").click()
+    page1.get_by_text("已了解，继续访问应用系统").click()
+    page1.get_by_text("报关单查询下载").click()
+    page1.locator("iframe[name=\"iframe01\"]").content_frame.locator("#entryId").click()
+    page1.locator("iframe[name=\"iframe01\"]").content_frame.locator("#entryId").fill("531620260004863835")
+    page1.locator("iframe[name=\"iframe01\"]").content_frame.get_by_role("button", name="   查询").click()
+    page1.locator("iframe[name=\"iframe01\"]").content_frame.locator("input[name=\"btSelectItem\"]").check()
+    with page1.expect_popup() as page2_info:
+        page1.locator("iframe[name=\"iframe01\"]").content_frame.get_by_role("button", name="   批量预览/打印").click()
+    page2 = page2_info.value
+    page3 = context.new_page()
+    page3.goto("edge://downloads-hub/")
+
+    # ---------------------
+    context.close()
+    browser.close()
+
+
+with sync_playwright() as playwright:
+    run(playwright)

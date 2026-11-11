@@ -7,6 +7,8 @@
 - 不加载 UserConfig，不执行 initEnv（不会关闭其他进程）
 - 公司、凭据目标名、浏览器参数直接读取 config.xlsx
 - 卡口令从 Windows 凭据管理器读取
+- 单一窗口打印的报关单存到临时目录（06_Temp/{公司}/YYYYMM），仅供提取信息，
+  真正归档的报关单以电子口岸导出为准（test_chinaport.py）
 
 用法：
     python tests/test_single_window.py
@@ -32,6 +34,7 @@ if str(ROOT) not in sys.path:
 from config.config_loader import ConfigError, ConfigLoader
 from log.loggingConfig import logger
 from utils.credential import CredentialError, get_password
+from utils.naming import DECLARATION_DOC_TYPE, build_document_path, parse_export_date
 from web.browser import BrowserManager
 from web.single_window.bonded_list import BondedListQuery
 from web.single_window.declaration import DeclarationExport
@@ -42,6 +45,7 @@ DEFAULT_CONFIG = (
     ROOT / "data" / "QX0002_报关单和放行通知单等单据的处理" / "01_Config" / "config.xlsx"
 )
 DEFAULT_OUTPUT_DIR = ROOT / "data" / "QX0002_报关单和放行通知单等单据的处理" / "03_Output"
+DEFAULT_TEMP_DIR = ROOT / "data" / "QX0002_报关单和放行通知单等单据的处理" / "06_Temp"
 
 
 def _as_bool(value, default: bool = False) -> bool:
@@ -66,12 +70,28 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--out-dir", default=str(DEFAULT_OUTPUT_DIR), help="导出目录，默认 data/.../03_Output")
     parser.add_argument(
+        "--temp-dir", default=str(DEFAULT_TEMP_DIR),
+        help="临时目录，默认 data/.../06_Temp；单一窗口打印的报关单存这里（正确版本以电子口岸导出为准）",
+    )
+    parser.add_argument(
         "--bonded-no", default="QD573026E000091160", metavar="保税核注清单编号",
         help="保税核注清单打印下载；留空则跳过（默认用最新录制的清单号）",
     )
     parser.add_argument(
         "--bonded-days", type=int, default=62,
         help="保税核注清单查询天数，默认当天往前 62 天（日期跨度需小于 90 天）",
+    )
+    parser.add_argument(
+        "--contract-no", default=None,
+        help="合同编号（来自报关单合同协议号）；不传用占位符“无合同号”，仅用于文件命名",
+    )
+    parser.add_argument(
+        "--export-date", default=None,
+        help="出口日期 YYYYMMDD（来自报关单详情 Excel）；不传用当天，仅用于命名与归档年月",
+    )
+    parser.add_argument(
+        "--entry-no", default=None, metavar="报关单号",
+        help="报关单号（海关编号，用于单据命名）；不传时退回统一编号",
     )
     return parser.parse_args()
 
@@ -210,6 +230,14 @@ def run(args: argparse.Namespace) -> None:
         stamp = time.strftime("%Y%m%d %H%M%S")
         out_dir = Path(args.out_dir)
         download_timeout = int(loader.get("系统配置.下载超时(秒)", 60)) * 1000
+        # 报关单号/合同编号/出口日期最终由报关单详情 Excel 提供（解析未实现），测试用命令行参数
+        contract_no = (args.contract_no or "").strip()
+        export_date = parse_export_date(args.export_date) if args.export_date else date.today()
+        if not (args.entry_no and args.contract_no and args.export_date):
+            logger.warning(
+                f"报关单号/合同编号/出口日期未全部提供，按 {args.entry_no or '统一编号'}"
+                f"/{contract_no or '无合同号'}/{export_date:%Y%m%d} 命名，仅用于验证下载"
+            )
 
         if args.export_list or args.detail_no:
             if args.no_submit:
@@ -231,8 +259,20 @@ def run(args: argparse.Namespace) -> None:
                 exporter.query_by_no(cus_ciq_no)
                 detail_path = out_dir / "报关单详情" / f"{cus_ciq_no}-报关单详情-{stamp}.xlsx"
                 exported.append(exporter.export_detail(cus_ciq_no, detail_path))
+                # 单一窗口打印的报关单仅供提取信息，存 06_Temp/{公司}/YYYYMM
+                declaration_path = build_document_path(
+                    Path(args.temp_dir) / company_name,
+                    (args.entry_no or cus_ciq_no).strip(),
+                    contract_no,
+                    export_date,
+                    DECLARATION_DOC_TYPE,
+                )
                 exported.extend(
-                    exporter.download_documents(cus_ciq_no, out_dir / "下载单据").values()
+                    exporter.download_documents(
+                        cus_ciq_no,
+                        out_dir / "下载单据",
+                        declaration_path=declaration_path,
+                    ).values()
                 )
                 exported.extend(
                     exporter.download_invoice_packing(cus_ciq_no, out_dir / "下载单据").values()

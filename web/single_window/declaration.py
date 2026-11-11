@@ -183,11 +183,14 @@ class DeclarationExport(BasePage):
         logger.info(f"详情导出完成: {cus_ciq_no} -> {path}")
         return path
 
-    def download_documents(self, cus_ciq_no: str, save_dir) -> dict:
+    def download_documents(self, cus_ciq_no: str, save_dir, declaration_path=None) -> dict:
         """依次下载报关单、放行通知单、电子委托协议
 
         需先执行 query_by_no 查询到该条数据；详情导出后行勾选一般还在，
         这里重新勾选一次，避免列表刷新导致选择丢失。
+
+        单一窗口打印的报关单不是最终正确版本（以中国电子口岸导出为准），
+        传入 declaration_path 时报关单存到该临时路径，其余单据仍存 save_dir。
         """
         frame = self._find_frame()
         self.check_box(
@@ -199,11 +202,14 @@ class DeclarationExport(BasePage):
 
         saved = {}
         for doc_name, button_name in DOCUMENT_BUTTONS:
+            target = out_dir / f"{cus_ciq_no}-{doc_name}.pdf"
+            if doc_name == "报关单" and declaration_path:
+                target = Path(declaration_path)
             frame = self._find_frame()
             frame.get_by_role("button", name=re.compile(button_name)).click()
             path = self.save_download(
                 lambda: frame.get_by_text(PREVIEW_TEXT).click(),
-                out_dir / f"{cus_ciq_no}-{doc_name}.pdf",
+                target,
                 pdf_preview=True,
             )
             saved[doc_name] = path

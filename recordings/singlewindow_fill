@@ -46,10 +46,10 @@ def run(playwright: Playwright) -> None:
     "<div class="itswInput" style="width: 14%;">
 												<input type="text" class="layer-date form-control laydate-icon" id="updateTime1" name="updateTime">
 											</div>"
-    page1.locator("iframe[name=\"iframe01\"]").content_frame.get_by_text("提运单号 申报地海关 是否结关 1-是").click()#最近操作时间止
+    page1.locator("iframe[name=\"iframe01\"]").content_frame.get_by_text("提运单号 申报地海关 是否结关 1-是").click() #最近操作时间止
     "<div class="itswInput" style="width: 14%">
 												<input type="text" class="layer-date form-control laydate-icon" id="updateTimeEnd1" name="updateTimeEnd">
-											</div>
+											</div>"
     page1.locator("iframe[name=\"iframe01\"]").content_frame.get_by_role("button", name="   查询").click()
 
     # ---------------------
