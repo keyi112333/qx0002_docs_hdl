@@ -459,7 +459,7 @@ class DownloadSubtask(TaskBase):
         for doc_type, path in record["docs"].items():
             column = PATH_COLUMNS.get(doc_type)
             if column:
-                values[column] = self._relative(path)
+                values[column] = self._absolute(path)
 
         values.update({
             "运行状态": record["status"],
@@ -528,11 +528,10 @@ class DownloadSubtask(TaskBase):
     def _valid(path) -> bool:
         return bool(path) and Path(path).exists() and Path(path).stat().st_size > 0
 
-    def _relative(self, path) -> str:
-        try:
-            return str(Path(path).relative_to(self.output_dir))
-        except ValueError:
-            return str(path)
+    @staticmethod
+    def _absolute(path) -> str:
+        """结果表记录文件绝对路径"""
+        return str(Path(path).resolve())
 
     def _page_timeout(self) -> int:
         return int(self.config.get("系统配置.页面超时(秒)", 30)) * 1000
