@@ -2,15 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 子任务：登录单一窗口
-"""
-from datetime import date, timedelta
 
+登录后把货物申报页面存入上下文，由“报关单列表与待处理清单”子任务
+按 7 天分段查询导出（8.4），本子任务不再固定查询 7 天。
+"""
 from core.task_base import TaskBase
 from log.loggingConfig import logger
 from utils.credential import get_password
 from web.browser import BrowserManager
 from web.single_window.login import SingleWindowLogin
-from web.single_window.query import DeclarationQuery
 
 
 def _as_bool(value, default: bool = False) -> bool:
@@ -48,7 +48,6 @@ class SingleWindowLoginSubtask(TaskBase):
         url = config.get("系统配置.单一窗口地址", "https://www.singlewindow.cn/#/")
         page_timeout = int(config.get("系统配置.页面超时(秒)", 30)) * 1000
         login_timeout = int(config.get("系统配置.登录超时(秒)", 120)) * 1000
-        query_step = int(config.get("业务参数.查询分段天数", 7))
 
         browser = BrowserManager(headless=headless, channel=channel)
         browser.start()
@@ -58,8 +57,5 @@ class SingleWindowLoginSubtask(TaskBase):
         login = SingleWindowLogin(browser, url=url, page_timeout=page_timeout)
         login.login(password, timeout=login_timeout)
         goods_page = login.open_declaration_query()
-
-        end_date = date.today()
-        start_date = end_date - timedelta(days=query_step - 1)
-        DeclarationQuery(goods_page).search(start_date, end_date)
+        self.context.set("single_window_page", goods_page)
         return True

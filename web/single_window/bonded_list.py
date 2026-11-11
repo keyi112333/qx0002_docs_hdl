@@ -4,8 +4,9 @@
 单一窗口-加工贸易账册-综合查询-保税核注清单查询与打印下载
 
 入口：门户-业务应用-口岸执法申报-加工贸易账册（新窗口）-综合查询-保税核注清单查询。
-企业类型/海关编码按录制只输入空格，进出口标志填“出口”，实际以清单号和申报日期为准；
+企业类型/海关编码改为“点击输入框 → 空格 → 输入值 → 回车”确认，不再查找下拉项；
 查不到数据时页面会弹“未查询到相关的清单数据”，需点确定关闭。
+用完调用 close()：关闭账册窗口并回到门户首页，下一个模块重新进入。
 """
 import re
 import time
@@ -21,18 +22,37 @@ ENTERPRISE_TYPE_PLACEHOLDER = "请选择要查询的企业类型"
 CUSTOMS_CODE_PLACEHOLDER = (
     "请选择企业类型对应的海关编码；若选择授权企业，仅支持查询当前登录企业申报或录入的清单数据。"
 )
-IE_FLAG_INPUT = 'input[name="impExpMarkCdName"]'
 START_DATE_INPUT = "#inputDateStart"
 END_DATE_INPUT = "#inputDateEnd"
+DEFAULT_HOME_URL = "https://www.singlewindow.cn/#/"
+
+# 真实控件：文本显示域 + 隐藏编码域（日志实测）
+ENTERPRISE_TYPE_HIDDEN = "#qryEntType"
+ENTERPRISE_TYPE_NAME = "#qryEntTypeName"
+IE_FLAG_HIDDEN = "#impExpMarkCd"
+IE_FLAG_NAME = "#impExpMarkCdName"
+IE_FLAG_EXPORT_CODE = "E"
+IE_FLAG_EXPORT_NAME = "出口"
+
+JS_SET_VALUE = """
+(el, value) => {
+    el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+"""
 
 
 class BondedListQuery(BasePage):
     """保税核注清单查询与打印"""
 
-    def __init__(self, portal_page, page_timeout: int = 30000, download_timeout: int = 60000):
+    def __init__(self, portal_page, page_timeout: int = 30000, download_timeout: int = 60000,
+                 home_url: str = DEFAULT_HOME_URL):
         super().__init__(portal_page)
         self.page_timeout = page_timeout
         self.download_timeout = download_timeout
+        self.portal_page = portal_page
+        self.home_url = home_url
 
     def open(self) -> None:
         """从门户打开保税核注清单查询页（加工贸易账册为新窗口）"""
@@ -63,22 +83,16 @@ class BondedListQuery(BasePage):
     def query(self, bond_invt_no: str, start_date, end_date, enterprise_code: str = "4404260A2T") -> bool:
         """填写查询条件并查询
 
-        企业类型/海关编码需先点输入框、再输入空格唤出下拉，然后点下拉里的文本选项；
+        - 企业类型：点击输入框 → 空格 → 输入“加工单位” → 回车；回车没选中时改点下拉项；
+        - 企业海关编码：同法输入后回车；
+        - 进出口标志：直接设置隐藏域/显示域（impExpMarkCd=E / 出口），避免下拉选成“进口”；
         返回 True 表示查到数据，False 表示页面提示“未查询到相关的清单数据”。
         """
         frame = self._find_frame()
 
-        enterprise_type = frame.get_by_role("textbox", name=ENTERPRISE_TYPE_PLACEHOLDER)
-        self._focus_and_space(enterprise_type)
-        self._pick_option("加工单位", timeout=1500)
-
-        customs_code = frame.get_by_role("textbox", name=CUSTOMS_CODE_PLACEHOLDER)
-        self._focus_and_space(customs_code)
-        self._pick_option(enterprise_code, timeout=1500)
-
-        ie_flag = frame.locator(IE_FLAG_INPUT)
-        ie_flag.click()
-        ie_flag.fill("出口")
+        self._select_by_typing(frame, ENTERPRISE_TYPE_PLACEHOLDER, "加工单位", ENTERPRISE_TYPE_HIDDEN)
+        self._select_by_typing(frame, CUSTOMS_CODE_PLACEHOLDER, enterprise_code)
+        self._set_export_flag(frame)
 
         bond_input = frame.locator(QUERY_ANCHOR)
         bond_input.click()
@@ -89,6 +103,113 @@ class BondedListQuery(BasePage):
 
         frame.get_by_role("button", name=re.compile("查询")).first.click()
         return self._wait_query_result(bond_invt_no)
+
+    def _select_by_typing(self, frame, placeholder: str, value: str,
+                          hidden_selector: str = None) -> None:
+        """点击 → 空格 → 输入 → 点选下拉中的同名项（不按回车，回车会选中下拉第一项）
+
+        Args:
+            hidden_selector: 该字段对应的隐藏编码域，传入时回读编码用于校验
+        """
+        locator = frame.get_by_role("textbox", name=placeholder)
+        try:
+            locator.click(timeout=5000)
+            locator.press(" ", timeout=3000)
+            self.page.wait_for_timeout(300)
+            locator.press_sequentially(value, delay=50, timeout=10000)
+            self.page.wait_for_timeout(500)
+
+            if self._pick_item_by_text(frame, value):
+                logger.info(f"已点选下拉项: {value} 实际={locator.input_value(timeout=3000)}")
+                self._log_hidden_code(frame, hidden_selector, value)
+                return
+
+            logger.warning(
+                f"下拉中未找到匹配项: {value}，当前输入值={locator.input_value(timeout=3000)}"
+            )
+            self._log_dropdown_items(frame)
+        except PlaywrightTimeoutError as e:
+            logger.warning(f"输入框填写超时，继续按清单号查询: {value} - {e}")
+
+    @staticmethod
+    def _log_dropdown_items(frame) -> None:
+        """输出当前可见的下拉项文本，便于按实际选项调整匹配"""
+        try:
+            items = frame.evaluate(
+                """() => Array.from(document.querySelectorAll('li, dd'))
+                    .filter(el => el.offsetParent !== null && el.innerText && el.innerText.trim())
+                    .map(el => `${el.tagName}:${el.innerText.trim().slice(0, 40)}`)
+                    .slice(0, 20)"""
+            )
+            logger.warning(f"可见下拉项: {items}")
+        except Exception as e:
+            logger.warning(f"读取下拉项失败: {e}")
+
+    @staticmethod
+    def _log_hidden_code(frame, hidden_selector: str, value: str) -> None:
+        """回读隐藏编码域，确认编码不是空值（避免显示正确但编码未写入）"""
+        if not hidden_selector:
+            return
+        try:
+            code = frame.locator(hidden_selector).input_value(timeout=3000)
+            if code:
+                logger.info(f"隐藏编码已写入: {value} -> {code}")
+            else:
+                logger.warning(f"隐藏编码为空，可能未真正选中: {value}")
+        except Exception as e:
+            logger.warning(f"读取隐藏编码失败: {e}")
+
+    def _pick_item_by_text(self, frame, text: str, timeout: int = 3000) -> bool:
+        """在已展开的下拉中点选匹配项（li/dd）：先精确匹配，再按包含匹配"""
+        exact = re.compile(rf"^\s*{re.escape(text)}\s*$")
+        deadline = time.time() + timeout / 1000
+        while time.time() < deadline:
+            for tag in ("li", "dd"):
+                items = frame.locator(tag)
+                for index in range(items.count()):
+                    item = items.nth(index)
+                    try:
+                        if not item.is_visible():
+                            continue
+                        content = item.inner_text().strip()
+                        if len(content) > 60:
+                            continue
+                        if exact.match(content) or text in content:
+                            item.click()
+                            return True
+                    except Exception:
+                        continue
+            self.page.wait_for_timeout(200)
+        return False
+
+    def _set_export_flag(self, frame) -> None:
+        """进出口标志直接设为“出口”（隐藏域 E + 显示域 出口）"""
+        try:
+            frame.locator(IE_FLAG_HIDDEN).evaluate(JS_SET_VALUE, IE_FLAG_EXPORT_CODE)
+            frame.locator(IE_FLAG_NAME).evaluate(JS_SET_VALUE, IE_FLAG_EXPORT_NAME)
+            actual = frame.locator(IE_FLAG_NAME).input_value(timeout=3000)
+            logger.info(f"进出口标志已设置: 期望={IE_FLAG_EXPORT_NAME} 实际={actual}")
+        except Exception as e:
+            logger.warning(f"设置进出口标志失败: {e}")
+
+    def close(self) -> None:
+        """关闭加工贸易账册窗口并回到门户首页，便于重新进入下一个模块"""
+        app = self.page
+        try:
+            if app is not None and app is not self.portal_page and not app.is_closed():
+                app.close()
+                logger.info("已关闭加工贸易账册窗口")
+        except Exception as e:
+            logger.warning(f"关闭加工贸易账册窗口失败: {e}")
+
+        self.page = self.portal_page
+        try:
+            if self.portal_page is not None and not self.portal_page.is_closed():
+                self.portal_page.goto(self.home_url)
+                self.portal_page.wait_for_timeout(500)
+                logger.info("已返回单一窗口首页")
+        except Exception as e:
+            logger.warning(f"返回单一窗口首页失败: {e}")
 
     def _wait_query_result(self, bond_invt_no: str) -> bool:
         """等待结果出现；出现“未查询到相关的清单数据”时点确定并返回 False"""
@@ -192,38 +313,6 @@ class BondedListQuery(BasePage):
                 return item
             self.page.wait_for_timeout(300)
         return None
-
-    @staticmethod
-    def _focus_and_space(locator) -> None:
-        """聚焦输入框后按空格唤出下拉
-
-        用 focus 代替 click，避免元素被浮层遮挡时反复等待可操作性（每次约 30 秒）；
-        聚焦/按键超时也只记录日志，不阻塞后续按清单号查询。
-        """
-        try:
-            locator.focus(timeout=3000)
-            locator.press(" ", timeout=3000)
-        except PlaywrightTimeoutError:
-            logger.warning("输入框聚焦或空格按键超时，跳过下拉选择")
-
-    def _pick_option(self, text: str, timeout: int = 1500) -> bool:
-        """点输入框后按空格键才会弹出自动完成下拉，点其中匹配文本才算选中"""
-        deadline = time.time() + timeout / 1000
-        while time.time() < deadline:
-            for frame in self.page.frames:
-                try:
-                    options = frame.locator(".autocompleter-list li, .autocompleter li")
-                    for index in range(options.count()):
-                        option = options.nth(index)
-                        if option.is_visible() and text in option.inner_text():
-                            option.click()
-                            logger.info(f"已选择下拉项: {option.inner_text().strip()}")
-                            return True
-                except Exception:
-                    continue
-            self.page.wait_for_timeout(200)
-        logger.warning(f"下拉中未找到匹配项: {text}")
-        return False
 
     def _find_frame_with_button(self, button_name: str, timeout: int = None):
         """在所有 frame 中查找包含指定按钮的页面"""

@@ -56,10 +56,53 @@ class DeclarationExport(BasePage):
     页面可能存在多个同名 iframe，按“可见的统一编号查询框”定位实际使用的 frame。
     """
 
-    def __init__(self, page, page_timeout: int = 30000, download_timeout: int = 60000):
+    def __init__(self, page, page_timeout: int = 30000, download_timeout: int = 60000,
+                 step_interval: int = 0):
         super().__init__(page)
         self.page_timeout = page_timeout
         self.download_timeout = download_timeout
+        # 查询→全选→列表导出之间的停顿（毫秒），避免页面未刷新完就连续操作导致卡住
+        self.step_interval = max(int(step_interval), 0)
+
+    def _pause(self, factor: int = 1) -> None:
+        if self.step_interval:
+            self.page.wait_for_timeout(self.step_interval * factor)
+
+    def wait_result_settled(self, timeout: int = None, interval: int = 300) -> int:
+        """等待查询结果刷新完成：加载遮罩消失，且行数连续两次不变
+
+        分段查询时上一段的结果仍在页面上，直接全选会把旧数据导出，
+        因此每次点【查询】后先等列表稳定，再进入全选/导出。
+        """
+        frame = self._find_frame()
+        # 点击查询后先给页面一个短暂的渲染窗口，再开始判断
+        self.page.wait_for_timeout(600)
+
+        deadline = time.time() + (timeout or self.page_timeout) / 1000
+        last_count, stable = None, 0
+        while time.time() < deadline:
+            try:
+                loading = frame.locator(".fixed-table-loading")
+                if loading.count() > 0 and loading.first.is_visible():
+                    last_count, stable = None, 0
+                    self.page.wait_for_timeout(interval)
+                    continue
+            except Exception:
+                pass
+
+            count = frame.locator(ROW_CHECK_BOX).count()
+            if count > 0 and count == last_count:
+                stable += 1
+                if stable >= 2:
+                    logger.info(f"查询结果已刷新: {count} 条")
+                    return count
+            else:
+                stable = 0
+            last_count = count
+            self.page.wait_for_timeout(interval)
+
+        logger.warning(f"等待查询结果刷新超时，当前行数: {last_count or 0}")
+        return last_count or 0
 
     def select_all(self) -> int:
         """勾选表头全选复选框，返回勾选到的数据行数"""
@@ -86,7 +129,7 @@ class DeclarationExport(BasePage):
         return count
 
     def export_list(self, save_path) -> Path:
-        """全选后点击【列表导出】，保存全量列表"""
+        """全选后点击【列表导出】，保存全量列表（导出完成后停顿，供下一段重新填写时间）"""
         self.select_all()
         frame = self._find_frame()
         path = Path(save_path)
@@ -110,6 +153,7 @@ class DeclarationExport(BasePage):
         download.save_as(path)
         path = self._normalize_export(path)
         logger.info(f"列表导出完成: {path}")
+        self._pause()
         return path
 
     @staticmethod
@@ -155,9 +199,21 @@ class DeclarationExport(BasePage):
             f"导出文件不是 Excel: {path}（{size} 字节，头部 {head!r}），请检查列表导出是否成功"
         )
 
-    def query_by_no(self, cus_ciq_no: str) -> None:
-        """按统一编号查询，等待该编号出现在结果列表"""
+    def query_by_no(self, cus_ciq_no: str, start_date=None, end_date=None) -> None:
+        """按统一编号查询，等待该编号出现在结果列表
+
+        Args:
+            cus_ciq_no: 统一编号
+            start_date/end_date: 该单所属“最近操作时间”分段；不传则沿用页面上的时间条件，
+                传入可避免列表查询后时间条件过期导致查不到早前分段的报关单
+        """
         frame = self._find_frame()
+        if start_date is not None and end_date is not None:
+            frame.locator("#updateTime1").evaluate(JS_SET_VALUE, start_date.strftime("%Y-%m-%d"))
+            frame.locator("#updateTimeEnd1").evaluate(JS_SET_VALUE, end_date.strftime("%Y-%m-%d"))
+            logger.info(f"按单查询前重设最近操作时间: {start_date} ~ {end_date}")
+            self._pause()
+
         field = frame.locator(QUERY_ANCHOR)
         field.evaluate(JS_SET_VALUE, cus_ciq_no)
         if field.input_value() != cus_ciq_no:
@@ -168,6 +224,7 @@ class DeclarationExport(BasePage):
             frame.locator(RESULT_TABLE).get_by_role("row", name=cus_ciq_no).first.wait_for(timeout=self.page_timeout)
         except PlaywrightTimeoutError:
             raise RuntimeError(f"统一编号查询无结果: {cus_ciq_no}") from None
+        self._pause()
         logger.info(f"统一编号查询完成: {cus_ciq_no}")
 
     def export_detail(self, cus_ciq_no: str, save_path) -> Path:
@@ -183,7 +240,8 @@ class DeclarationExport(BasePage):
         logger.info(f"详情导出完成: {cus_ciq_no} -> {path}")
         return path
 
-    def download_documents(self, cus_ciq_no: str, save_dir, declaration_path=None) -> dict:
+    def download_documents(self, cus_ciq_no: str, save_dir, declaration_path=None,
+                           doc_types=None, resolve_path=None) -> dict:
         """依次下载报关单、放行通知单、电子委托协议
 
         需先执行 query_by_no 查询到该条数据；详情导出后行勾选一般还在，
@@ -191,6 +249,10 @@ class DeclarationExport(BasePage):
 
         单一窗口打印的报关单不是最终正确版本（以中国电子口岸导出为准），
         传入 declaration_path 时报关单存到该临时路径，其余单据仍存 save_dir。
+
+        Args:
+            doc_types: 只下载指定单据（如 (“放行通知单”, “电子委托协议”)），None 表示全部
+            resolve_path: 回调 (单据名称, 默认路径) -> 目标路径，用于按 4.3 规则命名
         """
         frame = self._find_frame()
         self.check_box(
@@ -202,9 +264,13 @@ class DeclarationExport(BasePage):
 
         saved = {}
         for doc_name, button_name in DOCUMENT_BUTTONS:
+            if doc_types and doc_name not in doc_types:
+                continue
             target = out_dir / f"{cus_ciq_no}-{doc_name}.pdf"
             if doc_name == "报关单" and declaration_path:
                 target = Path(declaration_path)
+            if resolve_path:
+                target = Path(resolve_path(doc_name, target))
             frame = self._find_frame()
             frame.get_by_role("button", name=re.compile(button_name)).click()
             path = self.save_download(
@@ -216,11 +282,12 @@ class DeclarationExport(BasePage):
             logger.info(f"单据下载完成: {doc_name} -> {path}")
         return saved
 
-    def download_invoice_packing(self, cus_ciq_no: str, save_dir) -> dict:
+    def download_invoice_packing(self, cus_ciq_no: str, save_dir, resolve_path=None) -> dict:
         """点击结果列表里的统一编号进入单据页，从【随附单据】下载发票与装箱单
 
         录制脚本里点到的是“发票/文件名”单元格，实际要行内的【下载】才会出文件；
         下载完成后关闭单据页并返回报关数据查询，便于继续处理下一条。
+        传入 resolve_path 时按 4.3 规则命名目标文件。
         """
         list_frame = self._find_frame()
         list_frame.get_by_role("link", name=cus_ciq_no).click()
@@ -242,7 +309,8 @@ class DeclarationExport(BasePage):
 
             path = self.save_download(
                 lambda: self._click_row_download(row, detail),
-                out_dir / f"{cus_ciq_no}-{doc_name}.pdf",
+                (Path(resolve_path(doc_name, out_dir / f"{cus_ciq_no}-{doc_name}.pdf"))
+                 if resolve_path else out_dir / f"{cus_ciq_no}-{doc_name}.pdf"),
             )
             saved[doc_name] = path
             logger.info(f"附件下载完成: {doc_name} -> {path}")

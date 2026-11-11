@@ -58,15 +58,16 @@ class ChinaPortDeclarationExport(BasePage):
     def download_declaration(self, entry_id: str, save_path) -> Path:
         """勾选该条报关单后点击【批量预览/打印】，保存打印出的文件
 
-        打印会打开预览窗口，下载事件可能挂在主页面或预览页上，
-        因此对整个浏览器上下文监听下载；没有下载事件时再按预览地址取 PDF。
+        与单一窗口打印一致：会弹出 PDF 预览窗口，工具栏无法点击，
+        复用 BasePage.save_download 的 pdf_preview 处理（按弹窗地址取 PDF）。
         """
         frame = self._find_frame()
         self._select_entry(frame, entry_id)
 
-        path = Path(save_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        saved = self._batch_print(frame, path)
+        button = frame.get_by_role("button", name=BATCH_PRINT_BUTTON_NAME)
+        if button.count() == 0:
+            raise RuntimeError("报关单查询下载页未找到【批量预览/打印】按钮")
+        saved = self.save_download(lambda: button.first.click(), save_path, pdf_preview=True)
         logger.info(f"报关单下载完成: {entry_id} -> {saved}")
         return saved
 
@@ -83,88 +84,6 @@ class ChinaPortDeclarationExport(BasePage):
             raise RuntimeError(f"报关单查询无结果: {entry_id}") from None
         self.check_box(checkbox)
         logger.info(f"已勾选报关单: {entry_id}")
-
-    def _batch_print(self, frame, path: Path) -> Path:
-        """点击【批量预览/打印】并捕获下载/预览文件"""
-        context = self.page.context
-        downloads, opened = [], []
-
-        def on_download(download) -> None:
-            downloads.append(download)
-
-        def on_page(page) -> None:
-            opened.append(page)
-            page.on("download", on_download)
-
-        context.on("page", on_page)
-        for page in context.pages:
-            page.on("download", on_download)
-
-        try:
-            button = frame.get_by_role("button", name=BATCH_PRINT_BUTTON_NAME)
-            if button.count() == 0:
-                raise RuntimeError("报关单查询下载页未找到【批量预览/打印】按钮")
-            button.first.click()
-
-            deadline = time.time() + self.download_timeout / 1000
-            while time.time() < deadline and not downloads:
-                self.page.wait_for_timeout(200)
-
-            if downloads:
-                download = downloads[0]
-                failure = download.failure()
-                if failure:
-                    raise RuntimeError(f"报关单下载失败: {failure}")
-
-                suggested = Path(download.suggested_filename)
-                if suggested.suffix and suggested.suffix.lower() != path.suffix.lower():
-                    path = path.with_suffix(suggested.suffix)
-                    logger.info(f"按实际文件格式保存: {suggested.name} -> {path.name}")
-
-                download.save_as(path)
-                return path
-
-            # 没有下载事件时，预览窗口地址可能就是 PDF 本身（与单一窗口打印一致）
-            fetched = self._fetch_pdf(opened or [p for p in context.pages if p is not self.page], path)
-            if fetched:
-                return fetched
-            raise RuntimeError("批量预览/打印未产生下载，且预览窗口中没有可取的 PDF")
-        finally:
-            context.remove_listener("page", on_page)
-            for page in context.pages:
-                try:
-                    page.remove_listener("download", on_download)
-                except Exception:
-                    pass
-            for page in opened:
-                try:
-                    page.close()
-                except Exception:
-                    pass
-
-    def _fetch_pdf(self, pages, path: Path):
-        """按预览窗口地址取回 PDF（与浏览器共享 Cookie）"""
-        for page in reversed(pages):
-            try:
-                url = page.url
-            except Exception:
-                continue
-            if not url or url.startswith(("about:", "blob:", "edge:", "chrome:", "devtools:")):
-                continue
-
-            try:
-                response = page.context.request.get(url, headers={"Referer": self.page.url})
-                body = response.body() if response.ok else b""
-            except Exception as e:
-                logger.warning(f"按预览地址获取 PDF 失败: {url} - {e}")
-                continue
-
-            if body.startswith(b"%PDF"):
-                path.write_bytes(body)
-                logger.info(f"已按预览地址保存 PDF: {url}")
-                return path
-            logger.warning(f"预览地址不是 PDF: HTTP {response.status} {url}")
-        return None
 
     def _find_frame(self, timeout: int = None):
         """在所有 frame 中查找可见的报关单查询下载页"""
