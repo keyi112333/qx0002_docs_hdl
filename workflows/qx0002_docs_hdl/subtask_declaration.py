@@ -35,6 +35,8 @@ class DeclarationSubtask(TaskBase):
         super().__init__(f"报关单列表与待处理清单-{company_name}", context)
         self.company = company
         self.company_name = company_name
+        # 文件路径统一使用公司全称
+        self.company_path_name = str(company.get("公司全称") or company_name).strip()
         self.mode = mode
         # 指定 BIP 附件数据文件时不再直连 Oracle（供测试/重跑比对使用）
         self.bip_file = Path(bip_file) if bip_file else None
@@ -110,13 +112,13 @@ class DeclarationSubtask(TaskBase):
                     f"操作间隔 {step_interval / 1000:.0f} 秒")
         self.context.set("single_window_exporter", exporter)
 
-        segment_dir = Path(self.temp_dir) / self.company_name / "报关单列表"
+        segment_dir = Path(self.temp_dir) / self.company_path_name / "报关单列表"
         segment_dir.mkdir(parents=True, exist_ok=True)
 
         exported, missing = [], []
         for start, end in windows:
             target = segment_dir / (
-                f"{self.company_name}-报关单列表-{start:%Y%m%d}_{end:%Y%m%d}-"
+                f"{self.company_path_name}-报关单列表-{start:%Y%m%d}_{end:%Y%m%d}-"
                 f"{time.strftime('%Y%m%d %H%M%S')}.xlsx"
             )
             try:
@@ -137,8 +139,8 @@ class DeclarationSubtask(TaskBase):
 
         stamp = time.strftime("%Y%m%d %H%M%S")
         merged_path = (
-            Path(self.output_dir) / self.company_name / "报关单列表"
-            / f"{self.company_name}-报关单列表-合并-{stamp}.xlsx"
+            Path(self.output_dir) / self.company_path_name / "报关单列表"
+            / f"{self.company_path_name}-报关单列表-合并-{stamp}.xlsx"
         )
         try:
             return merge_exports(exported, merged_path)
@@ -185,8 +187,8 @@ class DeclarationSubtask(TaskBase):
 
         stamp = time.strftime("%Y%m%d %H%M%S")
         save_path = (
-            Path(self.output_dir) / self.company_name / "BIP已上传附件表"
-            / f"{self.company_name}-BIP已上传附件表-{stamp}.xlsx"
+            Path(self.output_dir) / self.company_path_name / "BIP已上传附件表"
+            / f"{self.company_path_name}-BIP已上传附件表-{stamp}.xlsx"
         )
         return fetch_attachment_export(self.config, save_path)
 
@@ -208,6 +210,6 @@ class DeclarationSubtask(TaskBase):
         year = year_of(export_date)
         if year not in self.result_tables:
             self.result_tables[year] = open_result_table(
-                self.log_dir, self.company_name, year, self.config_dir
+                self.log_dir, self.company_path_name, year, self.config_dir
             )
         return self.result_tables[year]

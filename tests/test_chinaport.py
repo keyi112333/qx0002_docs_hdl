@@ -103,6 +103,7 @@ def load_company(config_path: Path, company_name: str = None):
 def run(args: argparse.Namespace) -> None:
     loader, company = load_company(Path(args.config), args.company)
     company_name = str(company.get("公司名称") or "").strip()
+    company_path_name = str(company.get("公司全称") or company_name).strip()
     credential_target = str(args.credential or company.get("凭据目标名") or "").strip()
     if not credential_target:
         raise ConfigError(f"公司未配置凭据目标名: {company_name}")
@@ -137,7 +138,7 @@ def run(args: argparse.Namespace) -> None:
             app, page_timeout=page_timeout, download_timeout=download_timeout
         )
         exported = []
-        declaration_dir = Path(args.out_dir) / company_name / "下载单据"
+        declaration_dir = Path(args.out_dir) / company_path_name / "下载单据"
         logger.info(f"报关单归档目录: {declaration_dir}")
         for entry_no in entry_nos:
             exporter.query(entry_no)

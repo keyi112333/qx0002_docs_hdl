@@ -61,15 +61,17 @@ class DownloadSubtask(TaskBase):
         super().__init__(f"逐单下载单据-{company_name}", context)
         self.company = company
         self.company_name = company_name
+        # 文件路径统一使用公司全称
+        self.company_path_name = str(company.get("公司全称") or company_name).strip()
         self.mode = mode
         self.config = context.config
         self.output_dir = Path(self.config.get_path("output"))
         self.log_dir = Path(self.config.get_path("log"))
         self.temp_dir = Path(self.config.get_path("temp"))
         self.config_dir = self.config.get_path("config")
-        self.download_dir = self.output_dir / self.company_name / "下载单据"
-        self.detail_dir = self.temp_dir / self.company_name / "报关单详情"
-        self.staging_dir = self.temp_dir / self.company_name / "下载单据暂存"
+        self.download_dir = self.output_dir / self.company_path_name / "下载单据"
+        self.detail_dir = self.temp_dir / self.company_path_name / "报关单详情"
+        self.staging_dir = self.temp_dir / self.company_path_name / "下载单据暂存"
         self.retries = max(int(self.config.get("业务参数.单据下载重试次数", 2)), 1)
         policy = str(self.config.get("业务参数.同名文件处理", "overwrite") or "overwrite").strip()
         self.file_policy = "skip" if mode == "rerun" else policy
@@ -480,7 +482,7 @@ class DownloadSubtask(TaskBase):
     def _table(self, export_date):
         year = year_of(export_date)
         if year not in self.tables:
-            self.tables[year] = open_result_table(self.log_dir, self.company_name, year, self.config_dir)
+            self.tables[year] = open_result_table(self.log_dir, self.company_path_name, year, self.config_dir)
         return self.tables[year]
 
     # ------------------------------------------------------------------ 公共

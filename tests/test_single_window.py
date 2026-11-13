@@ -202,6 +202,7 @@ def read_first_unified_no(list_path: Path) -> str:
 def run(args: argparse.Namespace) -> None:
     loader, company = load_company(Path(args.config), args.company)
     company_name = str(company.get("公司名称") or "").strip()
+    company_path_name = str(company.get("公司全称") or company_name).strip()
     credential_target = str(company.get("凭据目标名") or "").strip()
     if not credential_target:
         raise ConfigError(f"公司未配置凭据目标名: {company_name}")
@@ -248,7 +249,7 @@ def run(args: argparse.Namespace) -> None:
 
             detail_nos = list(args.detail_no)
             if args.export_list:
-                list_path = out_dir / "报关单列表" / f"{company_name}-报关单列表-{stamp}.xlsx"
+                list_path = out_dir / "报关单列表" / f"{company_path_name}-报关单列表-{stamp}.xlsx"
                 exported.append(exporter.export_list(list_path))
                 if not detail_nos:
                     # BIP 比对未接入前，默认取导出列表的第一条统一编号
@@ -261,7 +262,7 @@ def run(args: argparse.Namespace) -> None:
                 exported.append(exporter.export_detail(cus_ciq_no, detail_path))
                 # 单一窗口打印的报关单仅供提取信息，存 06_Temp/{公司}/YYYYMM
                 declaration_path = build_document_path(
-                    Path(args.temp_dir) / company_name,
+                    Path(args.temp_dir) / company_path_name,
                     (args.entry_no or cus_ciq_no).strip(),
                     contract_no,
                     export_date,
